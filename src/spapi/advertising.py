@@ -17,6 +17,7 @@ import gzip
 import io
 import json
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -29,39 +30,57 @@ logger = get_logger(__name__)
 _TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 _REFRESH_BUFFER = 300
 
-# Module-level token cache (separate from SP-API token)
-_ads_token: dict[str, Any] | None = None
+
+@dataclass
+class AdsToken:
+    access_token: str
+    expires_at: float  # unix timestamp
+
+
+# Module-level token cache and lock (separate from SP-API token)
+_ads_token: AdsToken | None = None
+_ads_lock = asyncio.Lock()
 
 
 async def _get_ads_access_token() -> str:
-    """Get LWA access token for the Advertising API (separate client credentials)."""
+    """
+    Get LWA access token for the Advertising API (separate client credentials).
+    Thread-safe: uses asyncio.Lock to prevent duplicate refresh calls.
+    """
     global _ads_token
 
     now = time.time()
-    if _ads_token and _ads_token["expires_at"] - _REFRESH_BUFFER > now:
-        return _ads_token["access_token"]
+    if _ads_token and _ads_token.expires_at - _REFRESH_BUFFER > now:
+        return _ads_token.access_token
 
-    logger.info("ads_token_refresh")
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            _TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": settings.ADS_API_REFRESH_TOKEN,
-                "client_id": settings.ADS_API_CLIENT_ID,
-                "client_secret": settings.ADS_API_CLIENT_SECRET,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=15,
+    async with _ads_lock:
+        now = time.time()
+        if _ads_token and _ads_token.expires_at - _REFRESH_BUFFER > now:
+            return _ads_token.access_token
+
+        logger.info("ads_token_refresh")
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                _TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": settings.ADS_API_REFRESH_TOKEN,
+                    "client_id": settings.ADS_API_CLIENT_ID,
+                    "client_secret": settings.ADS_API_CLIENT_SECRET,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=15,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        _ads_token = AdsToken(
+            access_token=data["access_token"],
+            expires_at=now + data.get("expires_in", 3600),
         )
-        response.raise_for_status()
-        data = response.json()
+        logger.info("ads_token_refreshed")
 
-    _ads_token = {
-        "access_token": data["access_token"],
-        "expires_at": now + data.get("expires_in", 3600),
-    }
-    return _ads_token["access_token"]
+    return _ads_token.access_token
 
 
 def _ads_headers(token: str) -> dict[str, str]:

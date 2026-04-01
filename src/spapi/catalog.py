@@ -18,15 +18,14 @@ async def get_catalog_item(
     Fetch catalog item details for an ASIN.
     Returns salesRanks, summaries (rating, reviewCount), etc.
     """
-    client = SPAPIClient(marketplace_id=marketplace_id)
-    response = await client.get(
-        f"/catalog/2022-04-01/items/{asin}",
-        params={
-            "marketplaceIds": marketplace_id,
-            "includedData": "salesRanks,summaries",
-        },
-    )
-    return response
+    async with SPAPIClient(marketplace_id=marketplace_id) as client:
+        return await client.get(
+            f"/catalog/2022-04-01/items/{asin}",
+            params={
+                "marketplaceIds": marketplace_id,
+                "includedData": "salesRanks,summaries",
+            },
+        )
 
 
 async def get_reviews_for_asin(

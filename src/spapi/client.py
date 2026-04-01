@@ -4,10 +4,11 @@ Base SP-API HTTP client with AWS SigV4 signing.
 All SP-API modules inherit from or instantiate SPAPIClient.
 Handles:
   - LWA access token injection
-  - AWS SigV4 request signing via botocore
+  - AWS SigV4 request signing
   - Exponential backoff with jitter (tenacity)
   - Rate limit header logging
   - Pagination via nextToken
+  - Persistent httpx client (reuses TCP connections across requests)
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from tenacity import (
 )
 
 from src.config.settings import settings
-from src.spapi.auth import get_aws_credentials_sync, get_lwa_access_token
+from src.spapi.auth import get_aws_credentials, get_lwa_access_token
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -60,7 +61,8 @@ def _sigv4_headers(
 ) -> dict[str, str]:
     """
     Build SigV4-signed headers for a request.
-    Mutates and returns the headers dict with Authorization + x-amz-* fields.
+    Returns a new headers dict with Authorization + x-amz-* fields added.
+    Does not mutate the input headers dict.
     """
     parsed = urlparse(url)
     host = parsed.netloc
@@ -71,19 +73,18 @@ def _sigv4_headers(
     amz_date = now.strftime("%Y%m%dT%H%M%SZ")
     date_stamp = now.strftime("%Y%m%d")
 
-    headers = {
+    signed = {
         **headers,
         "host": host,
         "x-amz-date": amz_date,
         "x-amz-security-token": aws_session_token,
     }
 
-    # Canonical headers (sorted by key, lowercase)
     canonical_headers = "".join(
         f"{k.lower()}:{v.strip()}\n"
-        for k, v in sorted(headers.items())
+        for k, v in sorted(signed.items())
     )
-    signed_headers = ";".join(sorted(k.lower() for k in headers))
+    signed_headers_str = ";".join(sorted(k.lower() for k in signed))
 
     payload_hash = hashlib.sha256(body).hexdigest()
 
@@ -92,7 +93,7 @@ def _sigv4_headers(
         uri,
         query,
         canonical_headers,
-        signed_headers,
+        signed_headers_str,
         payload_hash,
     ])
 
@@ -107,19 +108,37 @@ def _sigv4_headers(
     signing_key = _get_signing_key(aws_secret_key, date_stamp)
     signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
 
-    headers["Authorization"] = (
+    signed["Authorization"] = (
         f"AWS4-HMAC-SHA256 Credential={aws_access_key}/{credential_scope}, "
-        f"SignedHeaders={signed_headers}, Signature={signature}"
+        f"SignedHeaders={signed_headers_str}, Signature={signature}"
     )
-    return headers
+    return signed
 
 
 class SPAPIClient:
-    """Async SP-API client. Instantiate once per job run."""
+    """
+    Async SP-API client. Instantiate once per job run.
+    Reuses a single httpx.AsyncClient for all requests (connection pooling).
+    Use as an async context manager to ensure the client is properly closed:
+
+        async with SPAPIClient() as client:
+            data = await client.get("/fba/inventory/v1/summaries", ...)
+    """
 
     def __init__(self, marketplace_id: str | None = None) -> None:
         self.base_url = settings.SP_API_BASE_URL
         self.marketplace_id = marketplace_id or settings.SP_API_MARKETPLACE_CA
+        self._http: httpx.AsyncClient = httpx.AsyncClient(timeout=30)
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client."""
+        await self._http.aclose()
+
+    async def __aenter__(self) -> SPAPIClient:
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        await self.aclose()
 
     @retry(
         retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException)),
@@ -147,7 +166,7 @@ class SPAPIClient:
             Parsed JSON response body.
         """
         lwa_token = await get_lwa_access_token()
-        aws_creds = get_aws_credentials_sync()
+        aws_creds = await get_aws_credentials()
 
         url = f"{self.base_url}{path}"
         if params:
@@ -171,15 +190,13 @@ class SPAPIClient:
             aws_session_token=aws_creds.session_token,
         )
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.request(
-                method=method,
-                url=url,
-                headers=signed_headers,
-                content=body_bytes,
-            )
+        response = await self._http.request(
+            method=method,
+            url=url,
+            headers=signed_headers,
+            content=body_bytes,
+        )
 
-        # Log rate limit info
         rate_limit = response.headers.get("x-amzn-ratelimit-limit")
         if rate_limit:
             logger.debug("sp_api_rate_limit", path=path, limit=rate_limit)

@@ -6,12 +6,14 @@ Two layers:
   2. AWS STS AssumeRole — exchanges IAM credentials → short-lived session credentials
 
 Both tokens are cached in memory and auto-refreshed before expiry.
+asyncio.Lock prevents concurrent coroutines from triggering duplicate refreshes.
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -39,15 +41,17 @@ class AWSCredentials:
     expires_at: float  # unix timestamp
 
 
-# Module-level caches
+# Module-level caches and locks
 _lwa_token: LWAToken | None = None
 _aws_credentials: AWSCredentials | None = None
+_lwa_lock = asyncio.Lock()
+_aws_lock = asyncio.Lock()
 
 
 async def get_lwa_access_token() -> str:
     """
     Return a valid LWA access token, refreshing if expired or missing.
-    Caches in module-level variable to minimise token requests.
+    Thread-safe: uses asyncio.Lock to prevent duplicate refresh calls.
     """
     global _lwa_token
 
@@ -55,35 +59,42 @@ async def get_lwa_access_token() -> str:
     if _lwa_token and _lwa_token.expires_at - _REFRESH_BUFFER_SECONDS > now:
         return _lwa_token.access_token
 
-    logger.info("lwa_token_refresh")
+    async with _lwa_lock:
+        # Re-check inside lock — another coroutine may have refreshed it
+        now = time.time()
+        if _lwa_token and _lwa_token.expires_at - _REFRESH_BUFFER_SECONDS > now:
+            return _lwa_token.access_token
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            settings.LWA_TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": settings.SP_API_REFRESH_TOKEN,
-                "client_id": settings.SP_API_CLIENT_ID,
-                "client_secret": settings.SP_API_CLIENT_SECRET,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=15,
+        logger.info("lwa_token_refresh")
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                settings.LWA_TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": settings.SP_API_REFRESH_TOKEN,
+                    "client_id": settings.SP_API_CLIENT_ID,
+                    "client_secret": settings.SP_API_CLIENT_SECRET,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=15,
+            )
+            response.raise_for_status()
+            data: dict[str, Any] = response.json()
+
+        _lwa_token = LWAToken(
+            access_token=data["access_token"],
+            expires_at=now + data.get("expires_in", 3600),
         )
-        response.raise_for_status()
-        data: dict[str, Any] = response.json()
+        logger.info("lwa_token_refreshed", expires_in=data.get("expires_in"))
 
-    _lwa_token = LWAToken(
-        access_token=data["access_token"],
-        expires_at=now + data.get("expires_in", 3600),
-    )
-    logger.info("lwa_token_refreshed", expires_in=data.get("expires_in"))
     return _lwa_token.access_token
 
 
-def get_aws_credentials_sync() -> AWSCredentials:
+async def get_aws_credentials() -> AWSCredentials:
     """
     Return valid AWS STS AssumeRole credentials, refreshing if expired.
-    Uses boto3 (sync) — called once and cached.
+    Async-safe: wraps boto3 (sync) in asyncio.to_thread() to avoid blocking.
+    Thread-safe: uses asyncio.Lock to prevent duplicate STS calls.
     """
     global _aws_credentials
 
@@ -91,8 +102,21 @@ def get_aws_credentials_sync() -> AWSCredentials:
     if _aws_credentials and _aws_credentials.expires_at - _REFRESH_BUFFER_SECONDS > now:
         return _aws_credentials
 
-    logger.info("aws_sts_assume_role")
+    async with _aws_lock:
+        # Re-check inside lock
+        now = time.time()
+        if _aws_credentials and _aws_credentials.expires_at - _REFRESH_BUFFER_SECONDS > now:
+            return _aws_credentials
 
+        logger.info("aws_sts_assume_role")
+        _aws_credentials = await asyncio.to_thread(_assume_role_sync)
+        logger.info("aws_sts_credentials_refreshed")
+
+    return _aws_credentials
+
+
+def _assume_role_sync() -> AWSCredentials:
+    """Synchronous STS AssumeRole call — run via asyncio.to_thread()."""
     import boto3
 
     sts = boto3.client(
@@ -107,12 +131,9 @@ def get_aws_credentials_sync() -> AWSCredentials:
         DurationSeconds=3600,
     )
     creds = response["Credentials"]
-
-    _aws_credentials = AWSCredentials(
+    return AWSCredentials(
         access_key=creds["AccessKeyId"],
         secret_key=creds["SecretAccessKey"],
         session_token=creds["SessionToken"],
-        expires_at=now + 3600,
+        expires_at=time.time() + 3600,
     )
-    logger.info("aws_sts_credentials_refreshed")
-    return _aws_credentials
