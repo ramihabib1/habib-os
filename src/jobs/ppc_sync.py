@@ -158,14 +158,18 @@ async def run() -> dict[str, Any]:
 
 
 def _map_campaign(c: dict, marketplace_uuid: str) -> dict:
+    # Amazon Ads API returns state as "ENABLED"/"PAUSED"/"ARCHIVED" — DB enum is lowercase.
+    # start_date is "YYYYMMDD" — reformat to ISO "YYYY-MM-DD" for PostgreSQL date column.
+    raw_date = c.get("startDate", "")
+    iso_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}" if len(raw_date) == 8 else None
     return {
         "campaign_id": str(c["campaignId"]),
         "campaign_name": c.get("name"),
         "marketplace_id": marketplace_uuid,
-        "state": c.get("state"),
+        "state": (c.get("state") or "").lower() or None,
         "targeting_type": c.get("targetingType"),
         "daily_budget": c.get("dailyBudget"),
-        "start_date": c.get("startDate"),
+        "start_date": iso_date,
     }
 
 
@@ -174,7 +178,7 @@ def _map_ad_group(ag: dict, campaign_uuid: str) -> dict:
         "ad_group_id": str(ag["adGroupId"]),
         "campaign_id": campaign_uuid,
         "ad_group_name": ag.get("name"),
-        "state": ag.get("state"),
+        "state": (ag.get("state") or "").lower() or None,
         "default_bid": ag.get("defaultBid"),
     }
 
@@ -184,8 +188,8 @@ def _map_keyword(kw: dict, ag_uuid: str) -> dict:
         "keyword_id": str(kw["keywordId"]),
         "ad_group_id": ag_uuid,
         "keyword_text": kw.get("keywordText"),
-        "match_type": kw.get("matchType"),
-        "state": kw.get("state"),
+        "match_type": (kw.get("matchType") or "").lower() or None,
+        "state": (kw.get("state") or "").lower() or None,
         "bid": kw.get("bid"),
     }
 
