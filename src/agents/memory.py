@@ -132,11 +132,11 @@ class AgentMemory:
             db = await get_supabase()
             await db.table("agent_memory").insert({
                 "agent": self.agent_name,
-                "task": task,
+                "memory_type": "learning",
+                "source_task": task,
                 "content": content,
                 "embedding": embedding,
                 "metadata": metadata or {},
-                "created_at": datetime.now(timezone.utc).isoformat(),
             }).execute()
         except Exception as exc:
             logger.warning("memory_store_failed", exc=str(exc))

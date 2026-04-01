@@ -32,16 +32,16 @@ async def send_to_role(
     text: str,
     parse_mode: str = ParseMode.MARKDOWN,
     reply_markup=None,
-) -> bool:
+) -> int | None:
     """
     Send a message to a team member by role name ("rami", "father", "maree").
 
-    Returns True on success, False on failure.
+    Returns the Telegram message_id on success, None on failure.
     """
     chat_id = ROLE_CHAT_IDS.get(role.lower())
     if not chat_id:
         logger.error("unknown_role", role=role)
-        return False
+        return None
 
     return await send_to_chat(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
 
@@ -51,24 +51,24 @@ async def send_to_chat(
     text: str,
     parse_mode: str = ParseMode.MARKDOWN,
     reply_markup=None,
-) -> bool:
-    """Send a message to a specific chat ID. Returns True on success."""
+) -> int | None:
+    """Send a message to a specific chat ID. Returns message_id on success, None on failure."""
     try:
         async with _get_bot() as bot:
-            await bot.send_message(
+            msg = await bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 parse_mode=parse_mode,
                 reply_markup=reply_markup,
             )
-        return True
+        return msg.message_id
     except Exception:
         logger.error(
             "telegram_send_failed",
             chat_id=chat_id,
             exc=traceback.format_exc(),
         )
-        return False
+        return None
 
 
 async def send_alert(

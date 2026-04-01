@@ -12,6 +12,9 @@ from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+# Valid agent_type enum values in the DB
+_VALID_AGENTS = {"ops", "finance", "marketing", "system"}
+
 
 async def log_action(
     agent: str,
@@ -25,23 +28,34 @@ async def log_action(
     Write one row to the audit_log table.
 
     Args:
-        agent:       Which agent/job performed the action (e.g. "inventory_sync").
+        agent:       Which agent/job performed the action. Non-enum values
+                     (e.g. job names like "inventory_sync") are mapped to "system".
         action:      What happened (e.g. "upsert_inventory_snapshot").
         entity_type: Table or domain affected (e.g. "inventory_snapshots").
-        entity_id:   Primary key or identifier of the affected row (optional).
+        entity_id:   UUID of the affected row (optional).
         details:     Arbitrary JSON payload with context.
-        status:      "success" | "error" | "skipped".
+        status:      "success" | "error" | "skipped" — mapped to success bool.
     """
     # Import here to avoid circular imports at module load time
     from src.config.supabase_client import get_supabase
 
-    row = {
-        "agent": agent,
+    # Map to valid agent_type enum; sync jobs use "system"
+    db_agent = agent if agent in _VALID_AGENTS else "system"
+
+    # Map string status to boolean success + optional error_message
+    is_success = status != "error"
+    error_message: str | None = None
+    if not is_success and isinstance(details, dict):
+        error_message = details.get("error") or details.get("exc")
+
+    row: dict[str, Any] = {
+        "agent": db_agent,
         "action": action,
         "entity_type": entity_type,
         "entity_id": entity_id,
         "details": details or {},
-        "status": status,
+        "success": is_success,
+        "error_message": error_message,
     }
 
     try:

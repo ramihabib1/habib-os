@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     LWA_TOKEN_URL: str = "https://api.amazon.com/auth/o2/token"
     APPROVAL_EXPIRY_HOURS: int = 24
     COST_BUDGET_MONTHLY_USD: float = 20.0
+    # Known active ASIN used as a probe for seller ID discovery via fees API.
+    # Any stable active Anabtawi ASIN works — Almond Fingers 375g.
+    PROBE_ASIN: str = "B0FT3HN2XV"
 
     @property
     def is_production(self) -> bool:

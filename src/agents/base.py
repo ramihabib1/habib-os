@@ -208,18 +208,20 @@ class BaseAgent:
         error: str | None,
     ) -> None:
         try:
+            now = datetime.now(timezone.utc).isoformat()
             db = await get_supabase()
             await db.table("agent_runs").insert({
                 "id": self._run_id,
                 "agent": self.role,
-                "skill": skill_name,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
+                "task": skill_name,
+                "tokens_input": input_tokens,
+                "tokens_output": output_tokens,
                 "cost_usd": round(cost_usd, 6),
-                "duration_seconds": round(duration, 2),
+                "duration_ms": int(duration * 1000),
                 "success": success,
-                "error": error,
-                "ran_at": datetime.now(timezone.utc).isoformat(),
+                "error_message": error,
+                "started_at": now,
+                "completed_at": now,
             }).execute()
         except Exception as exc:
             logger.warning("agent_run_log_failed", exc=str(exc))

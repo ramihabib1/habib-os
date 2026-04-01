@@ -1,4 +1,17 @@
-"""SP-API FBA inventory queries."""
+"""
+SP-API FBA inventory queries.
+
+Architecture note (from research):
+  The FBA Inventory API returns ALL SKUs that have EVER existed in the FBA
+  network, including ghost/zombie SKUs with fulfillableQuantity=0 that are no
+  longer active listings. There is no server-side filter to exclude them.
+
+  Correct strategy: only query for SKUs that are confirmed active in our DB
+  (is_active=true). Never use the full marketplace scan — it returns ghost SKUs.
+
+  The fulfillableQuantity field is the ONLY customer-facing quantity — it
+  represents units available to ship to customers right now.
+"""
 
 from __future__ import annotations
 
@@ -10,59 +23,46 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 
 _PATH = "/fba/inventory/v1/summaries"
-# Amazon API max SKUs per targeted request
-_SKU_BATCH_SIZE = 50
+_SKU_BATCH_SIZE = 50   # Amazon API max SKUs per targeted request
 
 
 async def get_fba_inventory_summaries(
     marketplace_id: str,
-    known_skus: list[str] | None = None,
+    known_skus: list[str],
 ) -> list[dict[str, Any]]:
     """
-    Fetch all FBA inventory summaries for a marketplace.
+    Fetch FBA inventory for a specific list of active SKUs.
 
-    Strategy (two-phase):
-    1. Targeted query for all known_skus (reliable, avoids pagination issues).
-       This is the primary source — ensures every product in our DB is covered.
-    2. Full marketplace query (single page, no pagination) to detect unknown/new
-       SKUs not yet in our products table. These are merged in by SKU.
+    Only queries for skus in known_skus (targeted query). No full marketplace
+    scan — that returns ghost SKUs and is unreliable.
 
-    The full marketplace query silently omits some active SKUs (Amazon API quirk),
-    so the targeted query is the authoritative source for known products.
+    Args:
+        marketplace_id: Amazon marketplace ID (e.g. A2EUQ1WTGCTBG2)
+        known_skus: Active SKUs from our DB (products.is_active = true).
+                    Caller must supply a non-empty list.
 
-    Returns a flat list of inventory summary objects from SP-API.
-    Each item contains sellerSku, fulfillableQuantity, reservedQuantity, etc.
+    Returns:
+        Flat list of inventory summary objects from SP-API.
+        Each item has: sellerSku, asin, fnSku, totalQuantity, inventoryDetails
     """
-    results: dict[str, dict[str, Any]] = {}  # keyed by sellerSku, deduplicates
+    if not known_skus:
+        logger.warning("fba_inventory_no_skus_provided")
+        return []
+
+    results: dict[str, dict[str, Any]] = {}
 
     async with SPAPIClient(marketplace_id=marketplace_id) as client:
-        # Phase 1: targeted query for all known SKUs (primary, authoritative)
-        if known_skus:
-            targeted = await _fetch_by_skus(client, marketplace_id, known_skus)
-            for s in targeted:
-                results[s["sellerSku"]] = s
-            logger.info("fba_inventory_targeted_query", known=len(known_skus), returned=len(targeted))
-
-        # Phase 2: single-page full marketplace query to catch unknown SKUs
-        response = await client.get(_PATH, params={
-            "details": "true",
-            "granularityType": "Marketplace",
-            "granularityId": marketplace_id,
-            "marketplaceIds": marketplace_id,
-        })
-        payload = response.get("payload", {})
-        full_page = payload.get("inventorySummaries", [])
-        new_unknown = 0
-        for s in full_page:
+        targeted = await _fetch_by_skus(client, marketplace_id, known_skus)
+        for s in targeted:
             sku = s.get("sellerSku")
-            if sku and sku not in results:
+            if sku:
                 results[sku] = s
-                new_unknown += 1
 
-    if new_unknown:
-        logger.info("fba_inventory_unknown_skus_found", count=new_unknown)
-
-    logger.info("fba_inventory_total", total=len(results))
+    logger.info(
+        "fba_inventory_done",
+        requested=len(known_skus),
+        returned=len(results),
+    )
     return list(results.values())
 
 
@@ -75,7 +75,7 @@ async def _fetch_by_skus(
     results: list[dict[str, Any]] = []
 
     for i in range(0, len(skus), _SKU_BATCH_SIZE):
-        batch = skus[i : i + _SKU_BATCH_SIZE]
+        batch = skus[i: i + _SKU_BATCH_SIZE]
         response = await client.get(_PATH, params={
             "details": "true",
             "granularityType": "Marketplace",

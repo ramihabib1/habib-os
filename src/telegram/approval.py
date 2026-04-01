@@ -40,17 +40,17 @@ ACTION_LABELS: dict[str, str] = {
 def _format_approval_message(request: dict[str, Any]) -> str:
     """Build the Telegram message text for an approval request."""
     action_label = ACTION_LABELS.get(request["action_type"], request["action_type"])
-    details = request.get("details", {})
+    payload = request.get("payload", {})
 
     lines = [
         f"*⚠️ Approval Required: {action_label}*",
         f"ID: `{request['id']}`",
         "",
         f"*Agent:* {request.get('agent', 'system')}",
-        f"*Reason:* {request.get('reason', 'N/A')}",
+        f"*Reason:* {request.get('description', 'N/A')}",
         "",
         "*Details:*",
-        f"```\n{json.dumps(details, indent=2, ensure_ascii=False)}\n```",
+        f"```\n{json.dumps(payload, indent=2, ensure_ascii=False)}\n```",
         "",
         "_Expires in 24 hours. Tap to approve or reject._",
     ]
@@ -67,22 +67,22 @@ def _approval_keyboard(request_id: str) -> InlineKeyboardMarkup:
     ])
 
 
-async def send_approval_request(request: dict[str, Any]) -> bool:
+async def send_approval_request(request: dict[str, Any]) -> int | None:
     """
     Send an approval request to Rami via Telegram.
     Only Rami can approve; this always goes to his chat.
 
-    Returns True if message was sent successfully.
+    Returns the Telegram message_id on success, None on failure.
     """
     text = _format_approval_message(request)
     keyboard = _approval_keyboard(str(request["id"]))
 
-    sent = await send_to_role("rami", text, reply_markup=keyboard)
-    if sent:
-        logger.info("approval_request_sent", request_id=request["id"])
+    msg_id = await send_to_role("rami", text, reply_markup=keyboard)
+    if msg_id:
+        logger.info("approval_request_sent", request_id=request["id"], msg_id=msg_id)
     else:
         logger.error("approval_request_send_failed", request_id=request["id"])
-    return sent
+    return msg_id
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -152,7 +152,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def poll_and_send_pending_approvals() -> int:
     """
     Fetch all pending approval_requests that have no Telegram message yet
-    (telegram_sent = false or null) and send them.
+    (telegram_msg_id IS NULL) and send them.
 
     Returns the number of requests sent.
     """
@@ -162,7 +162,7 @@ async def poll_and_send_pending_approvals() -> int:
             await db.table("approval_requests")
             .select("*")
             .eq("status", "pending")
-            .eq("telegram_sent", False)
+            .is_("telegram_msg_id", "null")
             .execute()
         )
         requests = result.data or []
@@ -172,18 +172,19 @@ async def poll_and_send_pending_approvals() -> int:
 
     sent = 0
     for req in requests:
-        if await send_approval_request(req):
-            # Mark as sent so we don't re-send on next poll
+        msg_id = await send_approval_request(req)
+        if msg_id:
+            # Store the Telegram message ID so we don't re-send on next poll
             try:
                 db = await get_supabase()
                 await (
                     db.table("approval_requests")
-                    .update({"telegram_sent": True})
+                    .update({"telegram_msg_id": msg_id})
                     .eq("id", req["id"])
                     .execute()
                 )
                 sent += 1
             except Exception as exc:
-                logger.error("mark_telegram_sent_failed", request_id=req["id"], exc=str(exc))
+                logger.error("mark_telegram_msg_id_failed", request_id=req["id"], exc=str(exc))
 
     return sent

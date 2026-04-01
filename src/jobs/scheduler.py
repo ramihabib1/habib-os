@@ -2,15 +2,18 @@
 Main scheduler entry point — runs all sync jobs and agent skills on a schedule.
 
 Schedule:
-  :00 every hour  — inventory_sync
-  :15 every hour  — orders_sync
-  :30 every hour  — expire_approvals
-  06:00 daily     — fees_sync
-  07:00 daily     — ppc_sync
-  08:00 daily     — reviews_sync
-  08:30 daily     — ops_agent: daily_briefing
-  20:00 Sunday    — finance_agent: weekly_finance
-  09:00 Monday    — competitor_sync + marketing_agent: competitor_snapshot
+  :00 every hour   — inventory_sync (active SKUs only, targeted query)
+  :15 every hour   — orders_sync
+  :30 every hour   — expire_approvals
+  00:00 daily      — listings_sync (Amazon → products table, source of truth)
+  06:00 daily      — listings_sync (second run — catch mid-day listing changes)
+  06:30 daily      — fees_sync
+  07:00 daily      — ppc_sync
+  07:00 every 4h   — pricing_sync (price + BSR via getPricing)
+  08:00 daily      — reviews_sync (rating + review_count only)
+  08:30 daily      — ops_agent: daily_briefing
+  20:00 Sunday     — finance_agent: weekly_finance
+  09:00 Monday     — competitor_sync + marketing_agent: competitor_snapshot
 
 Run via PM2: pm2 start ecosystem.config.js
 """
@@ -64,7 +67,9 @@ def _register_jobs() -> None:
         expire_approvals,
         fees_sync,
         inventory_sync,
+        listings_sync,
         orders_sync,
+        pricing_sync,
         ppc_sync,
         reviews_sync,
     )
@@ -80,8 +85,16 @@ def _register_jobs() -> None:
         _schedule_async, "expire_approvals", expire_approvals.run
     )
 
-    # ── Daily ─────────────────────────────────────────────────────────────────
+    # ── Daily — listings_sync runs twice: midnight + 06:00 ───────────────────
+    # listings_sync must run BEFORE inventory_sync has a chance to use stale
+    # is_active flags. Two runs catches mid-day listing status changes.
+    schedule.every().day.at("00:00").do(
+        _schedule_async, "listings_sync_midnight", listings_sync.run
+    )
     schedule.every().day.at("06:00").do(
+        _schedule_async, "listings_sync_morning", listings_sync.run
+    )
+    schedule.every().day.at("06:30").do(
         _schedule_async, "fees_sync", fees_sync.run
     )
     schedule.every().day.at("07:00").do(
@@ -92,6 +105,11 @@ def _register_jobs() -> None:
     )
     schedule.every().day.at("08:30").do(
         _schedule_async, "daily_briefing", _daily_briefing
+    )
+
+    # ── Every 4 hours — pricing + BSR ────────────────────────────────────────
+    schedule.every(4).hours.do(
+        _schedule_async, "pricing_sync", pricing_sync.run
     )
 
     # ── Weekly ────────────────────────────────────────────────────────────────

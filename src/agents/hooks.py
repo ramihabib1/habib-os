@@ -92,11 +92,10 @@ async def pre_tool_use_hook(
         "id": request_id,
         "action_type": action_type,
         "agent": agent_name,
-        "reason": reason or f"Agent wants to call {tool_name}",
-        "details": tool_input,
+        "description": reason or f"Agent wants to call {tool_name}",
+        "payload": tool_input,
         "status": "pending",
-        "telegram_sent": False,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "requested_at": datetime.now(timezone.utc).isoformat(),
     }
 
     try:

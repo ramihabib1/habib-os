@@ -1,0 +1,43 @@
+# Credentials — NEVER commit
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# Agent memory (local learnings — not shared via git)
+.claude/memory/*.md
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# PM2
+.pm2/
+
+# Node (dashboard)
+node_modules/
+.next/

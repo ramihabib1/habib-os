@@ -1,9 +1,12 @@
 """
-Daily job: sync product snapshots (BSR, rating) and reviews via SP-API catalog.
+Daily job: sync product rating + review count via SP-API Catalog Items API.
 
-Note: SP-API does not provide individual review text — only rating + count.
-Full review mining requires the Product Reviews API (separate approval process).
-For now this syncs BSR and star rating into product_snapshots.
+Note: BSR is now synced by pricing_sync (every 4h) via the getPricing API
+which returns SalesRankings for free alongside prices. This job only
+syncs rating and review_count from the Catalog Items API.
+
+SP-API does not provide individual review text — only rating + count.
+Full review mining requires the Product Reviews API (separate approval).
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from src.config.db_helpers import write_sync_log
 from src.config.settings import settings
 from src.config.supabase_client import get_supabase
 from src.spapi.catalog import get_catalog_item
@@ -25,6 +29,7 @@ _JOB_NAME = "reviews_sync"
 
 async def run() -> dict[str, Any]:
     start = time.monotonic()
+    started_at = datetime.now(timezone.utc).isoformat()
     records = 0
     error: str | None = None
 
@@ -32,7 +37,7 @@ async def run() -> dict[str, Any]:
         db = await get_supabase()
 
         # Fetch all active products with their ASINs
-        products_result = await db.table("products").select("id, sku, asin").execute()
+        products_result = await db.table("products").select("id, sku, asin, amazon_price").execute()
         products = [p for p in (products_result.data or []) if p.get("asin")]
         logger.info("reviews_sync_products", count=len(products))
 
@@ -57,7 +62,7 @@ async def run() -> dict[str, Any]:
             ).execute()
             records = len(snapshot_rows)
 
-        await _write_sync_log(db, "success", records, start)
+        await write_sync_log(db, _JOB_NAME, "success", records, start, started_at)
         await log_action(
             agent=_JOB_NAME,
             action="sync_complete",
@@ -71,7 +76,7 @@ async def run() -> dict[str, Any]:
         logger.error("reviews_sync_error", exc=error)
         try:
             db = await get_supabase()
-            await _write_sync_log(db, "error", records, start, error)
+            await write_sync_log(db, _JOB_NAME, "failed", records, start, started_at, error)
         except Exception:
             pass
         raise
@@ -107,27 +112,16 @@ def _extract_snapshot(product: dict, catalog_data: dict) -> dict | None:
                     bsr = rank.get("rank")
                     bsr_category = rank.get("displayGroupName")
 
-    if rating is None and bsr is None:
+    if rating is None and review_count is None:
         return None
 
     today = datetime.now(timezone.utc).date().isoformat()
+    # BSR and price are written by pricing_sync (every 4h via getPricing).
+    # This job only updates rating and review_count — use upsert so that
+    # pricing_sync's bsr/price values are preserved.
     return {
         "product_id": product["id"],
         "snapshot_date": today,
-        "bsr": bsr,
-        "bsr_category": bsr_category,
         "rating": rating,
         "review_count": review_count,
-        "price": product.get("amazon_price"),
     }
-
-
-async def _write_sync_log(db, status: str, records: int, start: float, error: str | None = None) -> None:
-    await db.table("sync_log").insert({
-        "type": _JOB_NAME,
-        "status": status,
-        "records_synced": records,
-        "duration_seconds": round(time.monotonic() - start, 2),
-        "error": error,
-        "completed_at": datetime.now(timezone.utc).isoformat(),
-    }).execute()
