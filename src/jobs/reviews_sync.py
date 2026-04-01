@@ -36,8 +36,8 @@ async def run() -> dict[str, Any]:
     try:
         db = await get_supabase()
 
-        # Fetch all active products with their ASINs
-        products_result = await db.table("products").select("id, sku, asin, amazon_price").execute()
+        # Fetch active products with their ASINs (is_active set by listings_sync)
+        products_result = await db.table("products").select("id, sku, asin, amazon_price").eq("is_active", True).execute()
         products = [p for p in (products_result.data or []) if p.get("asin")]
         logger.info("reviews_sync_products", count=len(products))
 
